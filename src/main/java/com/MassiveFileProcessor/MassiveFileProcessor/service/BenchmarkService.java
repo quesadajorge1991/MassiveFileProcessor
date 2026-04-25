@@ -6,8 +6,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import com.MassiveFileProcessor.MassiveFileProcessor.model.BenchmarkResult;
+import com.MassiveFileProcessor.MassiveFileProcessor.model.ProcessResult;
 
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -17,30 +19,42 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class BenchmarkService {
 
-   private final FileProcessorService fileProcessorService;
-    private final ProgressTracker progressTracker;  
+      private final FileProcessorService fileProcessorService;
+    private final ProgressTracker progressTracker;
     
     public List<BenchmarkResult> runBenchmark() throws Exception {
         log.info("Iniciando benchmark de rendimiento...");
         List<BenchmarkResult> results = new ArrayList<>();
         
-        // Crear archivo de prueba
-        File testFile = createTestFile(100000); // 100k registros
+        // Crear archivo de prueba - 10,000 registros para benchmark rápido
+        File testFile = createTestFile(10000);
         
-        // Probar con diferentes números de chunks (simulan diferentes niveles de paralelismo)
-        int[] chunkConfigs = {1, 2, 4, 8, 16};
+        // Verificar que el archivo se creó correctamente
+        if (testFile == null || !testFile.exists() || testFile.length() == 0) {
+            log.error("No se pudo crear el archivo de prueba");
+            return results;
+        }
+        
+        log.info("Archivo de prueba creado: {} bytes, {} registros", testFile.length(), 10000);
+        
+        // Probar con diferentes números de chunks
+        int[] chunkConfigs = {1, 2, 4, 8};
         long baselineTime = 0;
         
         for (int chunks : chunkConfigs) {
             log.info("Probando con {} chunks...", chunks);
             
+            // Crear una copia del archivo para cada prueba
+            File testFileCopy = new File(System.getProperty("java.io.tmpdir"), "benchmark_" + chunks + ".csv");
+            copyFile(testFile, testFileCopy);
+            
             long startTime = System.nanoTime();
-            String processId = fileProcessorService.processFileAsync(testFile, chunks);
+            String processId = fileProcessorService.processFileAsync(testFileCopy, chunks);
             
             // Esperar resultado
             long timeout = 120;
             long startWait = System.currentTimeMillis();
-            com.MassiveFileProcessor.MassiveFileProcessor.model.ProcessResult result = null;
+            ProcessResult result = null;
             
             while (System.currentTimeMillis() - startWait < timeout * 1000) {
                 result = progressTracker.getResult(processId);
@@ -65,25 +79,60 @@ public class BenchmarkService {
                 .build();
             
             results.add(benchmarkResult);
-            log.info("Chunks {}: {} ms, speedup: {}x", chunks, timeMs, speedup);
+            log.info("Chunks {}: {} ms, speedup: {}x, rows: {}", chunks, timeMs, speedup, 
+                result != null ? result.getTotalRows() : 0);
         }
         
+        // Limpiar archivo original
         testFile.delete();
+        
         return results;
     }
     
     private File createTestFile(int rows) throws IOException {
         File file = File.createTempFile("benchmark_", ".csv");
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
-            writer.write("id,nombre,email,edad\n");
+        
+        try (BufferedWriter writer = new BufferedWriter(
+                new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8))) {
+            
+            // Escribir encabezado
+            writer.write("id,nombre,email,edad");
+            writer.newLine();
+            
+            // Escribir datos
             for (int i = 1; i <= rows; i++) {
-                writer.write(i + ",Usuario" + i + ",user" + i + "@test.com," + (20 + (i % 50)) + "\n");
+                String line = String.format("%d,Usuario%d,user%d@test.com,%d",
+                    i, i, i, 20 + (i % 50));
+                writer.write(line);
+                writer.newLine();
+                
+                // Flush cada 10,000 registros
                 if (i % 10000 == 0) {
                     writer.flush();
+                    log.info("Generados {} registros...", i);
                 }
             }
+            
+            writer.flush();
         }
-        log.info("Archivo de prueba creado: {} filas, {} bytes", rows, file.length());
+        
+        // Verificar que el archivo no esté vacío
+        if (file.length() == 0) {
+            throw new IOException("El archivo de prueba se creó vacío");
+        }
+        
+        log.info("Archivo de prueba creado: {} registros, {} bytes", rows, file.length());
         return file;
+    }
+    
+    private void copyFile(File source, File dest) throws IOException {
+        try (InputStream is = new FileInputStream(source);
+             OutputStream os = new FileOutputStream(dest)) {
+            byte[] buffer = new byte[8192];
+            int length;
+            while ((length = is.read(buffer)) > 0) {
+                os.write(buffer, 0, length);
+            }
+        }
     }
 }
